@@ -1,0 +1,12 @@
+numpy
+torch
+segmentation-models-pytorch
+timm
+albumentations
+rasterio
+matplotlib
+tqdm
+torchmetrics
+opencv-python
+scipy
+jupyter
