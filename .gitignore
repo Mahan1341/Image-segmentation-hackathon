@@ -19,3 +19,8 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Dataset
+train/
+data/
+dataset/
