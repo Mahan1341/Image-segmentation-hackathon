@@ -68,6 +68,16 @@ Predicted segmentation masks are additionally processed using morphological oper
 - NumPy
 - Matplotlib
 
+## Installation
+
+Clone the repository and install the required dependencies:
+
+    git clone https://github.com/Mahan1341/Image-segmentation-hackathon.git
+    cd Image-segmentation-hackathon
+    pip install -r requirements.txt
+
+The dataset used during the hackathon is not included in the repository.
+
 ## Repository
 
 `main.ipynb` contains the full pipeline from loading the data to training, validation, inference and visualization.
