@@ -15,7 +15,7 @@ from torchmetrics.classification import MulticlassJaccardIndex
 from tqdm import tqdm
 
 
-NUM_CLASSES = 4
+NUM_CLASSES = 3
 IMAGE_SIZE = 512
 ENCODER = "timm-efficientnet-b5"
 ENCODER_WEIGHTS = "imagenet"
@@ -52,6 +52,11 @@ class SegmentationDataset(Dataset):
 
         with rasterio.open(mask_path) as src:
             mask = src.read(1).astype(np.int64)
+
+        if mask.min() < 0 or mask.max() >= NUM_CLASSES:
+            raise ValueError(
+                f"Mask {mask_path.name} contains labels outside [0, {NUM_CLASSES - 1}]"
+            )
 
         if self.transform is not None:
             transformed = self.transform(image=image, mask=mask)
@@ -245,10 +250,10 @@ def save_prediction_examples(model, dataset, device, output_path: Path, num_samp
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train the semantic segmentation model")
-    parser.add_argument("--train-images", default="train/train/image")
-    parser.add_argument("--train-masks", default="train/train/mask")
-    parser.add_argument("--val-images", default="train/val/image")
-    parser.add_argument("--val-masks", default="train/val/mask")
+    parser.add_argument("--train-images", default="data/paired/train/image")
+    parser.add_argument("--train-masks", default="data/paired/train/mask")
+    parser.add_argument("--val-images", default="data/paired/val/image")
+    parser.add_argument("--val-masks", default="data/paired/val/mask")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
