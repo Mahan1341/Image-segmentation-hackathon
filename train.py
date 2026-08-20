@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 from pathlib import Path
 
 import albumentations as A
@@ -11,17 +12,28 @@ import torch
 import torch.nn as nn
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import DataLoader, Dataset
-from torchmetrics.classification import MulticlassJaccardIndex
 from tqdm import tqdm
 
 
 NUM_CLASSES = 3
 INPUT_CHANNELS = 6
 IMAGE_SIZE = 256
+SEED = 42
 BAND_NAMES = ("B02", "B03", "B04", "B08", "B11", "B12")
 ENCODER = "timm-efficientnet-b5"
 ENCODER_WEIGHTS = "imagenet"
 DEFAULT_NUM_WORKERS = 0 if os.name == "nt" else 2
+
+
+def set_seed(seed: int = SEED) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 class SegmentationDataset(Dataset):
@@ -98,13 +110,24 @@ def compute_band_statistics(images_dir: str):
     return tuple(mean.tolist()), tuple(std.tolist())
 
 
-def build_transforms(image_size: int, mean, std):
-    normalize = A.Normalize(
-        mean=mean,
-        std=std,
-        max_pixel_value=1.0,
-    )
+def compute_class_weights(masks_dir: str):
+    mask_paths = sorted(Path(masks_dir).glob("*.tif"))
+    if not mask_paths:
+        raise FileNotFoundError(f"No .tif masks found in {masks_dir}")
 
+    counts = np.zeros(NUM_CLASSES, dtype=np.int64)
+    for path in mask_paths:
+        with rasterio.open(path) as src:
+            mask = src.read(1).astype(np.int64)
+        counts += np.bincount(mask.ravel(), minlength=NUM_CLASSES)[:NUM_CLASSES]
+
+    frequencies = counts / counts.sum()
+    weights = 1.0 / np.sqrt(np.maximum(frequencies, 1e-12))
+    weights /= weights.mean()
+    return counts, frequencies, weights.astype(np.float32)
+
+
+def build_transforms(image_size: int, mean, std):
     train_transform = A.Compose(
         [
             A.Resize(image_size, image_size),
@@ -138,7 +161,7 @@ def build_transforms(image_size: int, mean, std):
                 fill=0,
                 p=0.5,
             ),
-            normalize,
+            A.Normalize(mean=mean, std=std, max_pixel_value=1.0),
             ToTensorV2(),
         ]
     )
@@ -165,16 +188,16 @@ def create_model(device: torch.device) -> nn.Module:
 
 
 class CombinedLoss(nn.Module):
-    def __init__(self, dice_weight: float = 0.7, gamma: float = 2.0) -> None:
+    def __init__(self, class_weights: torch.Tensor, dice_weight: float = 0.5) -> None:
         super().__init__()
         self.dice_weight = dice_weight
         self.dice = smp.losses.DiceLoss(mode="multiclass", from_logits=True)
-        self.focal = smp.losses.FocalLoss(mode="multiclass", gamma=gamma)
+        self.cross_entropy = nn.CrossEntropyLoss(weight=class_weights)
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         dice_loss = self.dice(logits, targets)
-        focal_loss = self.focal(logits, targets)
-        return self.dice_weight * dice_loss + (1.0 - self.dice_weight) * focal_loss
+        ce_loss = self.cross_entropy(logits, targets)
+        return self.dice_weight * dice_loss + (1.0 - self.dice_weight) * ce_loss
 
 
 def train_one_epoch(model, loader, optimizer, loss_fn, device):
@@ -198,15 +221,34 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device):
     return running_loss / len(loader)
 
 
+def update_confusion(confusion: torch.Tensor, targets: torch.Tensor, predictions: torch.Tensor):
+    valid = (targets >= 0) & (targets < NUM_CLASSES)
+    encoded = NUM_CLASSES * targets[valid] + predictions[valid]
+    confusion += torch.bincount(
+        encoded,
+        minlength=NUM_CLASSES * NUM_CLASSES,
+    ).reshape(NUM_CLASSES, NUM_CLASSES)
+
+
+def iou_from_confusion(confusion: torch.Tensor):
+    ious = []
+    for class_id in range(NUM_CLASSES):
+        tp = confusion[class_id, class_id].item()
+        fp = confusion[:, class_id].sum().item() - tp
+        fn = confusion[class_id, :].sum().item() - tp
+        denominator = tp + fp + fn
+        ious.append(tp / denominator if denominator else float("nan"))
+
+    foreground = [value for value in ious[1:] if not np.isnan(value)]
+    mean_foreground_iou = float(np.mean(foreground)) if foreground else float("nan")
+    return ious, mean_foreground_iou
+
+
 @torch.no_grad()
 def validate(model, loader, loss_fn, device):
     model.eval()
     running_loss = 0.0
-    metric = MulticlassJaccardIndex(
-        num_classes=NUM_CLASSES,
-        ignore_index=0,
-        average="macro",
-    ).to(device)
+    confusion = torch.zeros((NUM_CLASSES, NUM_CLASSES), dtype=torch.int64, device=device)
 
     progress = tqdm(loader, desc="Validation", leave=False)
     for images, masks in progress:
@@ -217,11 +259,12 @@ def validate(model, loader, loss_fn, device):
         loss = loss_fn(logits, masks)
         predictions = logits.argmax(dim=1)
 
-        metric.update(predictions, masks)
+        update_confusion(confusion, masks, predictions)
         running_loss += loss.item()
         progress.set_postfix(loss=f"{loss.item():.4f}")
 
-    return running_loss / len(loader), float(metric.compute().cpu())
+    class_ious, mean_foreground_iou = iou_from_confusion(confusion)
+    return running_loss / len(loader), class_ious, mean_foreground_iou
 
 
 def save_training_curves(train_losses, val_losses, val_ious, output_path: Path) -> None:
@@ -235,10 +278,10 @@ def save_training_curves(train_losses, val_losses, val_ious, output_path: Path) 
     axes[0].set_title("Training loss")
     axes[0].legend()
 
-    axes[1].plot(val_ious, label="Validation IoU")
+    axes[1].plot(val_ious, label="Mean foreground IoU")
     axes[1].set_xlabel("Epoch")
     axes[1].set_ylabel("IoU")
-    axes[1].set_title("Validation IoU")
+    axes[1].set_title("Validation foreground IoU")
     axes[1].legend()
 
     fig.tight_layout()
@@ -310,20 +353,29 @@ def parse_args():
     parser.add_argument("--image-size", type=int, default=IMAGE_SIZE)
     parser.add_argument("--checkpoint", default="best_model.pth")
     parser.add_argument("--artifacts-dir", default="artifacts")
+    parser.add_argument("--seed", type=int, default=SEED)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    set_seed(args.seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     pin_memory = device.type == "cuda"
 
     print(f"Device: {device}")
+    print(f"Seed: {args.seed}")
     print(f"Bands: {', '.join(BAND_NAMES)}")
 
     mean, std = compute_band_statistics(args.train_images)
+    counts, frequencies, weights = compute_class_weights(args.train_masks)
+
     print("Training-band mean:", ", ".join(f"{value:.6f}" for value in mean))
     print("Training-band std: ", ", ".join(f"{value:.6f}" for value in std))
+    print("Class pixels:      ", ", ".join(str(value) for value in counts))
+    print("Class frequency:   ", ", ".join(f"{value:.4f}" for value in frequencies))
+    print("Class weights:     ", ", ".join(f"{value:.4f}" for value in weights))
 
     train_transform, val_transform = build_transforms(args.image_size, mean, std)
     train_dataset = SegmentationDataset(args.train_images, args.train_masks, train_transform)
@@ -332,12 +384,14 @@ def main():
     print(f"Train images: {len(train_dataset)}")
     print(f"Validation images: {len(val_dataset)}")
 
+    generator = torch.Generator().manual_seed(args.seed)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=pin_memory,
+        generator=generator,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -348,7 +402,8 @@ def main():
     )
 
     model = create_model(device)
-    loss_fn = CombinedLoss(dice_weight=0.7)
+    class_weights = torch.tensor(weights, dtype=torch.float32, device=device)
+    loss_fn = CombinedLoss(class_weights=class_weights, dice_weight=0.5)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -365,23 +420,28 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, device)
-        val_loss, val_iou = validate(model, val_loader, loss_fn, device)
+        val_loss, class_ious, mean_foreground_iou = validate(
+            model, val_loader, loss_fn, device
+        )
         scheduler.step(val_loss)
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
-        val_ious.append(val_iou)
+        val_ious.append(mean_foreground_iou)
 
-        if val_iou > best_iou:
-            best_iou = val_iou
+        if mean_foreground_iou > best_iou:
+            best_iou = mean_foreground_iou
             torch.save(model.state_dict(), checkpoint_path)
 
         print(
             f"Epoch {epoch:02d}/{args.epochs} | "
             f"train_loss={train_loss:.4f} | "
             f"val_loss={val_loss:.4f} | "
-            f"val_iou={val_iou:.4f} | "
-            f"best_iou={best_iou:.4f}"
+            f"iou_bg={class_ious[0]:.4f} | "
+            f"iou_c1={class_ious[1]:.4f} | "
+            f"iou_c2={class_ious[2]:.4f} | "
+            f"fg_miou={mean_foreground_iou:.4f} | "
+            f"best_fg_miou={best_iou:.4f}"
         )
 
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
@@ -402,7 +462,7 @@ def main():
         std,
     )
 
-    print(f"Best validation IoU: {best_iou:.4f}")
+    print(f"Best mean foreground IoU: {best_iou:.4f}")
     print(f"Saved checkpoint: {checkpoint_path}")
     print(f"Saved visualizations: {artifacts_dir}")
 
