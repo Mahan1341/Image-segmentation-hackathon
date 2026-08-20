@@ -127,7 +127,7 @@ def compute_class_weights(masks_dir: str):
     return counts, frequencies, weights.astype(np.float32)
 
 
-def build_transforms(image_size: int, mean, std):
+def build_transforms(image_size: int, mean, std, seed: int = SEED):
     train_transform = A.Compose(
         [
             A.Resize(image_size, image_size),
@@ -163,7 +163,8 @@ def build_transforms(image_size: int, mean, std):
             ),
             A.Normalize(mean=mean, std=std, max_pixel_value=1.0),
             ToTensorV2(),
-        ]
+        ],
+        seed=seed,
     )
 
     val_transform = A.Compose(
@@ -171,7 +172,8 @@ def build_transforms(image_size: int, mean, std):
             A.Resize(image_size, image_size),
             A.Normalize(mean=mean, std=std, max_pixel_value=1.0),
             ToTensorV2(),
-        ]
+        ],
+        seed=seed,
     )
     return train_transform, val_transform
 
@@ -377,7 +379,12 @@ def main():
     print("Class frequency:   ", ", ".join(f"{value:.4f}" for value in frequencies))
     print("Class weights:     ", ", ".join(f"{value:.4f}" for value in weights))
 
-    train_transform, val_transform = build_transforms(args.image_size, mean, std)
+    train_transform, val_transform = build_transforms(
+        args.image_size,
+        mean,
+        std,
+        seed=args.seed,
+    )
     train_dataset = SegmentationDataset(args.train_images, args.train_masks, train_transform)
     val_dataset = SegmentationDataset(args.val_images, args.val_masks, val_transform)
 
