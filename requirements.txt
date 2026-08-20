@@ -1,12 +1,11 @@
 numpy
 torch
-segmentation-models-pytorch
+segmentation-models-pytorch==0.5.0
 timm
-albumentations
+albumentations==2.0.8
 rasterio
 matplotlib
 tqdm
-torchmetrics
-opencv-python
+torchmetrics==1.9.0
 scipy
 jupyter
