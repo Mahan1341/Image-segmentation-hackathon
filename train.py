@@ -16,7 +16,9 @@ from tqdm import tqdm
 
 
 NUM_CLASSES = 3
-IMAGE_SIZE = 512
+INPUT_CHANNELS = 6
+IMAGE_SIZE = 256
+BAND_NAMES = ("B02", "B03", "B04", "B08", "B11", "B12")
 ENCODER = "timm-efficientnet-b5"
 ENCODER_WEIGHTS = "imagenet"
 DEFAULT_NUM_WORKERS = 0 if os.name == "nt" else 2
@@ -45,9 +47,10 @@ class SegmentationDataset(Dataset):
         with rasterio.open(image_path) as src:
             image = src.read().transpose(1, 2, 0).astype(np.float32)
 
-        if image.shape[2] != 3:
+        if image.shape[2] != INPUT_CHANNELS:
             raise ValueError(
-                f"Expected a 3-channel image, got shape {image.shape} for {image_path.name}"
+                f"Expected {INPUT_CHANNELS} channels, got shape {image.shape} "
+                f"for {image_path.name}"
             )
 
         with rasterio.open(mask_path) as src:
@@ -66,7 +69,42 @@ class SegmentationDataset(Dataset):
         return image, mask.long()
 
 
-def build_transforms(image_size: int):
+def compute_band_statistics(images_dir: str):
+    image_paths = sorted(Path(images_dir).glob("*.tif"))
+    if not image_paths:
+        raise FileNotFoundError(f"No .tif images found in {images_dir}")
+
+    band_sum = np.zeros(INPUT_CHANNELS, dtype=np.float64)
+    band_sq_sum = np.zeros(INPUT_CHANNELS, dtype=np.float64)
+    pixel_count = 0
+
+    for path in image_paths:
+        with rasterio.open(path) as src:
+            image = src.read().astype(np.float64)
+
+        if image.shape[0] != INPUT_CHANNELS:
+            raise ValueError(
+                f"Expected {INPUT_CHANNELS} channels, got {image.shape[0]} for {path.name}"
+            )
+
+        flattened = image.reshape(INPUT_CHANNELS, -1)
+        band_sum += flattened.sum(axis=1)
+        band_sq_sum += np.square(flattened).sum(axis=1)
+        pixel_count += flattened.shape[1]
+
+    mean = band_sum / pixel_count
+    variance = band_sq_sum / pixel_count - np.square(mean)
+    std = np.sqrt(np.maximum(variance, 1e-12))
+    return tuple(mean.tolist()), tuple(std.tolist())
+
+
+def build_transforms(image_size: int, mean, std):
+    normalize = A.Normalize(
+        mean=mean,
+        std=std,
+        max_pixel_value=1.0,
+    )
+
     train_transform = A.Compose(
         [
             A.Resize(image_size, image_size),
@@ -100,10 +138,7 @@ def build_transforms(image_size: int):
                 fill=0,
                 p=0.5,
             ),
-            A.Normalize(
-                mean=(0.485, 0.456, 0.406),
-                std=(0.229, 0.224, 0.225),
-            ),
+            normalize,
             ToTensorV2(),
         ]
     )
@@ -111,10 +146,7 @@ def build_transforms(image_size: int):
     val_transform = A.Compose(
         [
             A.Resize(image_size, image_size),
-            A.Normalize(
-                mean=(0.485, 0.456, 0.406),
-                std=(0.229, 0.224, 0.225),
-            ),
+            A.Normalize(mean=mean, std=std, max_pixel_value=1.0),
             ToTensorV2(),
         ]
     )
@@ -125,6 +157,7 @@ def create_model(device: torch.device) -> nn.Module:
     model = smp.DeepLabV3Plus(
         encoder_name=ENCODER,
         encoder_weights=ENCODER_WEIGHTS,
+        in_channels=INPUT_CHANNELS,
         classes=NUM_CLASSES,
         activation=None,
     )
@@ -213,8 +246,23 @@ def save_training_curves(train_losses, val_losses, val_ious, output_path: Path) 
     plt.close(fig)
 
 
+def percentile_stretch(rgb: np.ndarray) -> np.ndarray:
+    low = np.percentile(rgb, 2, axis=(0, 1), keepdims=True)
+    high = np.percentile(rgb, 98, axis=(0, 1), keepdims=True)
+    scale = np.maximum(high - low, 1e-6)
+    return np.clip((rgb - low) / scale, 0.0, 1.0)
+
+
 @torch.no_grad()
-def save_prediction_examples(model, dataset, device, output_path: Path, num_samples: int = 4):
+def save_prediction_examples(
+    model,
+    dataset,
+    device,
+    output_path: Path,
+    mean,
+    std,
+    num_samples: int = 4,
+):
     model.eval()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -222,19 +270,20 @@ def save_prediction_examples(model, dataset, device, output_path: Path, num_samp
     indices = np.linspace(0, len(dataset) - 1, count, dtype=int)
     fig, axes = plt.subplots(count, 3, figsize=(12, 4 * count), squeeze=False)
 
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    mean_arr = np.asarray(mean, dtype=np.float32)
+    std_arr = np.asarray(std, dtype=np.float32)
 
     for row, idx in enumerate(indices):
         image, true_mask = dataset[idx]
         logits = model(image.unsqueeze(0).to(device))
         pred_mask = logits.argmax(dim=1).squeeze(0).cpu().numpy()
 
-        display_image = image.permute(1, 2, 0).cpu().numpy()
-        display_image = np.clip(display_image * std + mean, 0.0, 1.0)
+        multispectral = image.permute(1, 2, 0).cpu().numpy()
+        multispectral = multispectral * std_arr + mean_arr
+        rgb = percentile_stretch(multispectral[..., [2, 1, 0]])
 
-        axes[row, 0].imshow(display_image)
-        axes[row, 0].set_title("Image")
+        axes[row, 0].imshow(rgb)
+        axes[row, 0].set_title("B04/B03/B02")
         axes[row, 1].imshow(true_mask.cpu().numpy(), vmin=0, vmax=NUM_CLASSES - 1)
         axes[row, 1].set_title("Ground truth")
         axes[row, 2].imshow(pred_mask, vmin=0, vmax=NUM_CLASSES - 1)
@@ -270,8 +319,13 @@ def main():
     pin_memory = device.type == "cuda"
 
     print(f"Device: {device}")
+    print(f"Bands: {', '.join(BAND_NAMES)}")
 
-    train_transform, val_transform = build_transforms(args.image_size)
+    mean, std = compute_band_statistics(args.train_images)
+    print("Training-band mean:", ", ".join(f"{value:.6f}" for value in mean))
+    print("Training-band std: ", ", ".join(f"{value:.6f}" for value in std))
+
+    train_transform, val_transform = build_transforms(args.image_size, mean, std)
     train_dataset = SegmentationDataset(args.train_images, args.train_masks, train_transform)
     val_dataset = SegmentationDataset(args.val_images, args.val_masks, val_transform)
 
@@ -344,6 +398,8 @@ def main():
         val_dataset,
         device,
         artifacts_dir / "prediction_examples.png",
+        mean,
+        std,
     )
 
     print(f"Best validation IoU: {best_iou:.4f}")
