@@ -19,6 +19,16 @@ The main selection metric is **mean foreground IoU**, computed as the mean of th
 
 Because only 53 historical image/mask pairs could be verified unambiguously, these numbers should be interpreted as a reproducible reconstruction of the original experiment rather than as a benchmark claim on the full original hackathon dataset.
 
+### Training curves
+
+![Training and validation curves](artifacts/training_curves.png)
+
+### Qualitative predictions
+
+The RGB previews below are rendered from the multispectral `B04/B03/B02` bands. Each row shows the input image, ground-truth mask, and model prediction.
+
+![Validation prediction examples](artifacts/prediction_examples.png)
+
 ## What the project covers
 
 - 6-band multispectral GeoTIFF loading with Rasterio
@@ -76,6 +86,9 @@ Training uses Albumentations with horizontal/vertical flips, random 90° rotatio
 
 ```text
 .
+├── artifacts/
+│   ├── prediction_examples.png
+│   └── training_curves.png
 ├── main.ipynb          # original hackathon notebook
 ├── train.py            # reproducible training pipeline
 ├── evaluate.py         # checkpoint evaluation and per-class IoU
