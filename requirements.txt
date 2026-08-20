@@ -2,7 +2,7 @@ numpy
 torch
 segmentation-models-pytorch==0.5.0
 timm
-albumentations==2.3.7
+albumentations==2.0.8
 rasterio
 matplotlib
 tqdm
