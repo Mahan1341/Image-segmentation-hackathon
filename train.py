@@ -131,11 +131,7 @@ class CombinedLoss(nn.Module):
         super().__init__()
         self.dice_weight = dice_weight
         self.dice = smp.losses.DiceLoss(mode="multiclass", from_logits=True)
-        self.focal = smp.losses.FocalLoss(
-            mode="multiclass",
-            gamma=gamma,
-            from_logits=True,
-        )
+        self.focal = smp.losses.FocalLoss(mode="multiclass", gamma=gamma)
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         dice_loss = self.dice(logits, targets)
