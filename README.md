@@ -1,89 +1,151 @@
 # Semantic Image Segmentation
 
-A solo semantic segmentation project developed for a machine learning hackathon in **September 2025**.
+A solo machine-learning hackathon project for **4-class semantic image segmentation** of TIFF imagery.
 
-The goal of the project was to build a multiclass image segmentation pipeline using deep learning. The solution is based on **DeepLabV3+** with an **EfficientNet-B5** encoder and was implemented using PyTorch.
+The original solution was developed in **September 2025** using **DeepLabV3+** with an **EfficientNet-B5** encoder. The repository now contains both the original hackathon notebook and a cleaned training script for reproducible reruns.
 
-## Overview
+## What the project covers
 
-The project covers the complete semantic segmentation workflow:
-
-- image and mask preprocessing
-- data augmentation
-- model configuration
-- training and validation
-- IoU-based model evaluation
+- TIFF image/mask loading with Rasterio
+- training and validation datasets
+- Albumentations-based augmentation
+- DeepLabV3+ model configuration
+- ImageNet-pretrained EfficientNet-B5 encoder
+- combined Dice + Focal loss
+- IoU/Jaccard validation
+- checkpoint selection by validation IoU
 - prediction visualization
-- mask post-processing
+- training-curve export
+- morphological mask post-processing in the original notebook
 
 ## Model
 
-- **Architecture:** DeepLabV3+
-- **Encoder:** EfficientNet-B5
-- **Encoder initialization:** ImageNet pretrained weights
-- **Number of classes:** 4
-- **Input resolution:** 512 × 512
-- **Framework:** PyTorch
+| Component | Configuration |
+| --- | --- |
+| Architecture | DeepLabV3+ |
+| Encoder | EfficientNet-B5 (`timm-efficientnet-b5`) |
+| Encoder weights | ImageNet pretrained |
+| Classes | 4 (background + 3 foreground classes) |
+| Input size | 512 × 512 |
+| Optimizer | Adam |
+| Initial learning rate | `1e-4` |
+| Scheduler | ReduceLROnPlateau |
+| Validation metric | multiclass IoU / Jaccard, background ignored |
 
-## Training
+The cleaned training pipeline keeps the model output as **raw logits**. Dice and Focal losses then handle the logits internally instead of applying softmax inside the segmentation model.
 
-The model is trained using a combination of:
+## Data augmentation
 
-- Dice Loss
-- Focal Loss
-
-The validation metric is **Intersection over Union (IoU)**.
-
-Training also uses:
-
-- Adam optimizer
-- ReduceLROnPlateau learning-rate scheduler
-- model selection based on validation IoU
-
-## Data Augmentation
-
-The augmentation pipeline is implemented with Albumentations and includes:
+The training pipeline uses Albumentations with:
 
 - horizontal and vertical flips
 - random 90° rotations
-- shift, scale and rotation
-- brightness and contrast changes
-- Gaussian noise
-- blur
+- affine translation, scale and rotation
+- brightness/contrast changes
+- Gaussian noise and blur
 - grid distortion
 - coarse dropout
+- ImageNet normalization
 
-## Post-processing
+Validation uses deterministic resizing and normalization only.
 
-Predicted segmentation masks are additionally processed using morphological operations to improve the final masks.
+## Repository structure
 
-## Tech Stack
+```text
+.
+├── main.ipynb          # original hackathon notebook
+├── train.py            # cleaned reproducible training pipeline
+├── requirements.txt
+├── .gitignore
+└── README.md
+```
 
-- Python
-- PyTorch
-- segmentation-models-pytorch
-- Albumentations
-- Rasterio
-- TorchMetrics
-- NumPy
-- Matplotlib
+`main.ipynb` is preserved as the original project artifact. `train.py` is the recommended entry point for rerunning the experiment now.
+
+## Dataset layout
+
+The dataset itself is intentionally not stored in the current working tree. The training script expects:
+
+```text
+train/
+├── train/
+│   ├── image/
+│   │   └── *.tif
+│   └── mask/
+│       └── *.tif
+└── val/
+    ├── image/
+    │   └── *.tif
+    └── mask/
+        └── *.tif
+```
+
+Image and mask filenames must match.
 
 ## Installation
 
-Clone the repository and install the required dependencies:
+```bash
+git clone https://github.com/Mahan1341/Image-segmentation-hackathon.git
+cd Image-segmentation-hackathon
+pip install -r requirements.txt
+```
 
-    git clone https://github.com/Mahan1341/Image-segmentation-hackathon.git
-    cd Image-segmentation-hackathon
-    pip install -r requirements.txt
+## Training
 
-The dataset used during the hackathon is not included in the repository.
+Run the cleaned pipeline with:
 
-## Repository
+```bash
+python train.py
+```
 
-`main.ipynb` contains the full pipeline from loading the data to training, validation, inference and visualization.
+Useful options:
+
+```bash
+python train.py --epochs 50 --batch-size 4 --lr 1e-4
+```
+
+On Windows, the script defaults to `num_workers=0` to avoid multiprocessing-related DataLoader failures. This can be overridden manually:
+
+```bash
+python train.py --num-workers 2
+```
+
+The best model is saved to:
+
+```text
+best_model.pth
+```
+
+Generated visualizations are saved to:
+
+```text
+artifacts/training_curves.png
+artifacts/prediction_examples.png
+```
+
+Model checkpoints are excluded from Git because of their size. Small result images can be committed after a reproducible run and used directly in this README.
+
+## Results
+
+The current repository does **not** claim a validation score because the previously committed notebook outputs did not contain a completed training run. The cleaned pipeline is intended to make the result reproducible rather than inventing a metric retrospectively.
+
+After rerunning the experiment, this section will include:
+
+- best validation IoU;
+- training/validation loss curves;
+- validation IoU curve;
+- qualitative image / ground-truth / prediction examples.
+
+## Original post-processing
+
+The hackathon notebook also contains a post-processing stage that applies per-class morphological opening/closing and removes small connected components before exporting final TIFF masks. This remains in `main.ipynb` as part of the original solution.
+
+## Tech stack
+
+Python · PyTorch · segmentation-models-pytorch · Albumentations · Rasterio · TorchMetrics · NumPy · Matplotlib · OpenCV · SciPy
 
 ## About
 
-**Type:** Solo project  
+**Type:** Solo hackathon project  
 **Date:** September 2025  
 **Task:** Multiclass semantic image segmentation
